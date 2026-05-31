@@ -15,7 +15,11 @@ const {
   PermissionFlagsBits,
   EmbedBuilder,
   AuditLogEvent,
-  ChannelType
+  ChannelType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  AttachmentBuilder
 } = require("discord.js");
 
 const client = new Client({
@@ -34,7 +38,7 @@ const client = new Client({
 // 2. PASTAS E ARQUIVOS
 // =====================================================
 
-["./data", "./backups", "./transcripts"].forEach(folder => {
+["./data", "./backups", "./backups/history", "./transcripts"].forEach(folder => {
   if (!fs.existsSync(folder)) fs.mkdirSync(folder);
 });
 
@@ -42,6 +46,8 @@ const CONFIG_PATH = "./data/config.json";
 const CASES_PATH = "./data/cases.json";
 const WARNS_PATH = "./data/warns.json";
 const RAID_BANS_PATH = "./data/raidbans.json";
+const SECURITY_STATS_PATH = "./data/securitystats.json";
+const TICKET_STATS_PATH = "./data/ticketstats.json";
 
 
 // =====================================================
@@ -84,6 +90,24 @@ const defaultConfig = {
   joinRaidLimit: 5,
   joinRaidTime: 10000,
 
+  panic: false,
+  ultrasecurity: false,
+
+  logsPremium: true,
+  logMessageDelete: true,
+  logMessageEdit: true,
+  logJoinLeave: true,
+  logNickname: true,
+  logRoles: true,
+  logPermissions: true,
+  logEmoji: true,
+  logWebhook: true,
+
+  autoBackup: true,
+  backupIntervalMinutes: 15,
+  ticketCategoryName: "🎫 Tickets",
+  ticketLogChannel: process.env.TICKET_LOG_CHANNEL_ID || null,
+
   quarantineRoleName: "Quarentena",
   logChannel: process.env.LOG_CHANNEL_ID || null
 };
@@ -103,6 +127,8 @@ createFile(CONFIG_PATH, defaultConfig);
 createFile(CASES_PATH, []);
 createFile(WARNS_PATH, {});
 createFile(RAID_BANS_PATH, []);
+createFile(SECURITY_STATS_PATH, { raidsBlocked: 0, usersPunished: 0, channelsRestored: 0, rolesRestored: 0, botsBlocked: 0, ticketsCreated: 0, ticketsClosed: 0 });
+createFile(TICKET_STATS_PATH, { created: 0, closed: 0, assumed: 0, ratings: [] });
 
 function readJSON(path) {
   return JSON.parse(fs.readFileSync(path, "utf8"));
@@ -124,6 +150,26 @@ function saveConfig(config) {
     ...defaultConfig,
     ...config
   });
+}
+
+function getSecurityStats() {
+  return readJSON(SECURITY_STATS_PATH);
+}
+
+function addSecurityStat(key, amount = 1) {
+  const stats = getSecurityStats();
+  stats[key] = (stats[key] || 0) + amount;
+  saveJSON(SECURITY_STATS_PATH, stats);
+}
+
+function getTicketStats() {
+  return readJSON(TICKET_STATS_PATH);
+}
+
+function addTicketStat(key, amount = 1) {
+  const stats = getTicketStats();
+  stats[key] = (stats[key] || 0) + amount;
+  saveJSON(TICKET_STATS_PATH, stats);
 }
 
 
@@ -249,6 +295,8 @@ async function punish(guild, userId, reason) {
     reason: `Security System: ${reason}`
   }).catch(() => {});
 
+  addSecurityStat("usersPunished");
+
   await saveRaidBan(guild.id, userId, reason);
 
   await sendLog(
@@ -303,6 +351,7 @@ async function saveRaidBan(guildId, userId, reason) {
 const actionMap = new Map();
 const spamMap = new Map();
 const joinMap = new Map();
+const suspiciousScoreMap = new Map();
 
 const ACTION_LIMIT = 3;
 const ACTION_TIME = 10000;
@@ -320,6 +369,36 @@ async function registerDangerAction(guild, userId, reason) {
   if (filtered.length >= ACTION_LIMIT) {
     await punish(guild, userId, reason);
     actionMap.delete(key);
+  }
+}
+
+async function addSuspicion(guild, userId, points, reason) {
+  if (!userId || isWhitelisted(userId)) return;
+
+  const key = `${guild.id}-${userId}`;
+  const data = suspiciousScoreMap.get(key) || { score: 0, reasons: [], last: Date.now() };
+
+  if (Date.now() - data.last > 60000) {
+    data.score = 0;
+    data.reasons = [];
+  }
+
+  data.score += points;
+  data.reasons.push(reason);
+  data.last = Date.now();
+  suspiciousScoreMap.set(key, data);
+
+  if (data.score >= 70) {
+    addSecurityStat("raidsBlocked");
+    await punish(guild, userId, `IA Anti-Raid: ${data.reasons.join(" | ")}`);
+    suspiciousScoreMap.delete(key);
+  } else if (data.score >= 40) {
+    await sendLog(
+      guild,
+      "🤖 IA Anti-Raid: comportamento suspeito",
+      `Usuário: <@${userId}>\nScore: **${data.score}/70**\nMotivos:\n${data.reasons.map(r => `• ${r}`).join("\n")}`,
+      "Orange"
+    );
   }
 }
 // =====================================================
@@ -432,6 +511,31 @@ async function createBackup(guild) {
 }
 
 
+
+async function createBackupHistory(guild) {
+  const backup = await createBackup(guild);
+  const safeDate = new Date().toISOString().replace(/[:.]/g, "-");
+  saveJSON(`./backups/history/${guild.id}-${safeDate}.json`, backup);
+  return backup;
+}
+
+function listBackupFiles(guildId) {
+  if (!fs.existsSync("./backups/history")) return [];
+  return fs.readdirSync("./backups/history")
+    .filter(file => file.startsWith(`${guildId}-`) && file.endsWith(".json"))
+    .sort()
+    .reverse();
+}
+
+async function restoreBackupFile(guild, fileName) {
+  const fullPath = `./backups/history/${fileName}`;
+  if (!fs.existsSync(fullPath)) return false;
+
+  const currentPath = `./backups/${guild.id}.json`;
+  fs.copyFileSync(fullPath, currentPath);
+  return restoreBackup(guild);
+}
+
 // =====================================================
 // 14. RESTORE COMPLETO DO SERVIDOR
 // =====================================================
@@ -521,6 +625,8 @@ async function restoreDeletedRole(role) {
 
   await newRole.setPosition(role.position).catch(() => {});
 
+  addSecurityStat("rolesRestored");
+
   await sendLog(
     guild,
     "♻️ Cargo restaurado",
@@ -561,6 +667,8 @@ async function restoreDeletedChannel(channel) {
 
   await newChannel.setPosition(channel.rawPosition).catch(() => {});
 
+  addSecurityStat("channelsRestored");
+
   await sendLog(
     guild,
     "♻️ Canal restaurado",
@@ -570,6 +678,87 @@ async function restoreDeletedChannel(channel) {
 
   return newChannel;
 }
+
+// =====================================================
+// 17. SISTEMA DE TICKETS / TRANSCRIPTS
+// =====================================================
+
+function htmlEscape(text = "") {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function makeSimplePDF(text, filePath) {
+  const safe = String(text).replace(/[()\\]/g, "\\$&").slice(0, 12000);
+  const lines = safe.match(/.{1,90}/g) || ["Transcript vazio"];
+  let y = 780;
+  const content = lines.map(line => {
+    const out = `BT /F1 10 Tf 40 ${y} Td (${line}) Tj ET`;
+    y -= 14;
+    return out;
+  }).join("\n");
+
+  const pdf = `%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n5 0 obj << /Length ${content.length} >> stream\n${content}\nendstream endobj\nxref\n0 6\n0000000000 65535 f \n0000000010 00000 n \n0000000059 00000 n \n0000000118 00000 n \n0000000278 00000 n \n0000000350 00000 n \ntrailer << /Root 1 0 R /Size 6 >>\nstartxref\n${420 + content.length}\n%%EOF`;
+
+  fs.writeFileSync(filePath, pdf);
+}
+
+async function getOrCreateTicketCategory(guild) {
+  const config = getConfig();
+  let category = guild.channels.cache.find(c =>
+    c.type === ChannelType.GuildCategory && c.name === config.ticketCategoryName
+  );
+
+  if (!category) {
+    category = await guild.channels.create({
+      name: config.ticketCategoryName,
+      type: ChannelType.GuildCategory,
+      reason: "Sistema de tickets"
+    }).catch(() => null);
+  }
+
+  return category;
+}
+
+async function createTicketTranscript(channel, closedById) {
+  const messages = [];
+  let lastId;
+
+  while (true) {
+    const fetched = await channel.messages.fetch({ limit: 100, before: lastId }).catch(() => null);
+    if (!fetched || fetched.size === 0) break;
+    messages.push(...fetched.values());
+    lastId = fetched.last().id;
+    if (messages.length >= 1000) break;
+  }
+
+  messages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
+  const baseName = `transcript-${channel.id}-${Date.now()}`;
+  const txtPath = `./transcripts/${baseName}.txt`;
+  const htmlPath = `./transcripts/${baseName}.html`;
+  const pdfPath = `./transcripts/${baseName}.pdf`;
+
+  const txt = messages.map(m => {
+    const date = new Date(m.createdTimestamp).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    const content = m.content || "[sem texto]";
+    return `[${date}] ${m.author.tag}: ${content}`;
+  }).join("\n");
+
+  fs.writeFileSync(txtPath, txt || "Transcript vazio.");
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Transcript</title><style>body{font-family:Arial;background:#0b0d12;color:#eee}.msg{padding:10px;border-bottom:1px solid #222}.author{color:#4da3ff;font-weight:bold}.date{color:#999;font-size:12px}</style></head><body><h1>Transcript - ${htmlEscape(channel.name)}</h1><p>Fechado por: ${closedById}</p>${messages.map(m => `<div class="msg"><div class="author">${htmlEscape(m.author.tag)}</div><div class="date">${new Date(m.createdTimestamp).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</div><div>${htmlEscape(m.content || "[sem texto]")}</div></div>`).join("")}</body></html>`;
+  fs.writeFileSync(htmlPath, html);
+
+  makeSimplePDF(txt || "Transcript vazio.", pdfPath);
+
+  return [txtPath, htmlPath, pdfPath];
+}
+
 // =====================================================
 // 17. CRIADOR DE COMANDOS ON/OFF
 // =====================================================
@@ -735,6 +924,63 @@ const commands = [
     .setDescription("Lista bots permitidos")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+
+
+  // =====================
+  // PREMIUM / SEGURANÇA DO DONO
+  // =====================
+
+  new SlashCommandBuilder()
+    .setName("panic")
+    .setDescription("Ativa o modo pânico")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("unpanic")
+    .setDescription("Desativa o modo pânico")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("ultrasecurity")
+    .setDescription("Ativa todas as proteções do bot")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("securitystats")
+    .setDescription("Mostra estatísticas de segurança")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("backupnow")
+    .setDescription("Cria backup manual com histórico")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("listbackups")
+    .setDescription("Lista backups salvos no histórico")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("restorebackup")
+    .setDescription("Restaura um backup do histórico")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(option =>
+      option.setName("arquivo").setDescription("Nome do arquivo do /listbackups").setRequired(true)
+    ),
+
+  // =====================
+  // TICKETS
+  // =====================
+
+  new SlashCommandBuilder()
+    .setName("ticketpanel")
+    .setDescription("Envia o painel de abertura de tickets")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("ticketstats")
+    .setDescription("Mostra estatísticas dos tickets")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   // =====================
   // BACKUP
@@ -1193,6 +1439,129 @@ client.on("interactionCreate", async interaction => {
         });
       }
     }
+
+    // ===================================
+    // PREMIUM / SEGURANÇA DO DONO
+    // ===================================
+
+    if (cmd === "panic") {
+      const config = getConfig();
+
+      config.panic = true;
+      config.antichannelcreate = true;
+      config.antirolecreate = true;
+      config.antibot = true;
+      config.antiinvite = true;
+      config.antiwebhook = true;
+      config.antieveryone = true;
+      config.antijoinraid = true;
+
+      saveConfig(config);
+
+      await sendLog(guild, "🚨 MODO PÂNICO ATIVADO", `Ativado por: <@${interaction.user.id}>`, "Red");
+
+      return interaction.reply({ ephemeral: true, content: "🚨 Modo pânico ativado." });
+    }
+
+    if (cmd === "unpanic") {
+      const config = getConfig();
+      config.panic = false;
+      saveConfig(config);
+
+      await sendLog(guild, "✅ MODO PÂNICO DESATIVADO", `Desativado por: <@${interaction.user.id}>`, "Green");
+
+      return interaction.reply({ ephemeral: true, content: "✅ Modo pânico desativado." });
+    }
+
+    if (cmd === "ultrasecurity") {
+      const config = getConfig();
+
+      Object.keys(config).forEach(key => {
+        if (typeof config[key] === "boolean") config[key] = true;
+      });
+
+      config.ultrasecurity = true;
+      config.emergency = true;
+      config.panic = true;
+      config.autoBackup = true;
+
+      saveConfig(config);
+
+      await sendLog(guild, "🛡️ ULTRA SECURITY ATIVADO", `Ativado por: <@${interaction.user.id}>`, "Green");
+
+      return interaction.reply({ ephemeral: true, content: "🛡️ Ultra Security ativado. Todas as proteções foram ligadas." });
+    }
+
+    if (cmd === "securitystats") {
+      const stats = getSecurityStats();
+
+      return interaction.reply({
+        ephemeral: true,
+        content:
+          `🛡️ **Estatísticas de Segurança**\n\n` +
+          `🚨 Raids bloqueadas: ${stats.raidsBlocked || 0}\n` +
+          `🔨 Usuários punidos: ${stats.usersPunished || 0}\n` +
+          `♻️ Canais restaurados: ${stats.channelsRestored || 0}\n` +
+          `♻️ Cargos restaurados: ${stats.rolesRestored || 0}\n` +
+          `🤖 Bots bloqueados: ${stats.botsBlocked || 0}`
+      });
+    }
+
+    if (cmd === "backupnow") {
+      await createBackupHistory(guild);
+      await sendLog(guild, "📦 Backup manual criado", `Criado por: <@${interaction.user.id}>`, "Green");
+      return interaction.reply({ ephemeral: true, content: "✅ Backup criado e salvo no histórico." });
+    }
+
+    if (cmd === "listbackups") {
+      const files = listBackupFiles(guild.id).slice(0, 10);
+      return interaction.reply({
+        ephemeral: true,
+        content: files.length ? `📦 **Últimos backups:**\n\n${files.map(f => `\`${f}\``).join("\n")}` : "❌ Nenhum backup no histórico."
+      });
+    }
+
+    if (cmd === "restorebackup") {
+      const fileName = interaction.options.getString("arquivo");
+      const ok = await restoreBackupFile(guild, fileName);
+      return interaction.reply({ ephemeral: true, content: ok ? "✅ Backup restaurado." : "❌ Backup não encontrado." });
+    }
+
+    if (cmd === "ticketpanel") {
+      const embed = new EmbedBuilder()
+        .setColor("Blue")
+        .setTitle("🎫 Central de Atendimento")
+        .setDescription("Clique no botão abaixo para abrir um ticket.")
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("ticket_open")
+          .setLabel("Abrir Ticket")
+          .setEmoji("🎫")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.channel.send({ embeds: [embed], components: [row] });
+      return interaction.reply({ ephemeral: true, content: "✅ Painel de ticket enviado." });
+    }
+
+    if (cmd === "ticketstats") {
+      const stats = getTicketStats();
+      const ratings = stats.ratings || [];
+      const avg = ratings.length ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1) : "Sem avaliações";
+
+      return interaction.reply({
+        ephemeral: true,
+        content:
+          `🎫 **Estatísticas de Tickets**\n\n` +
+          `Criados: ${stats.created || 0}\n` +
+          `Fechados: ${stats.closed || 0}\n` +
+          `Assumidos: ${stats.assumed || 0}\n` +
+          `Avaliação média: ${avg}`
+      });
+    }
+
         // ===================================
     // BACKUP / RESTORE
     // ===================================
@@ -1773,6 +2142,8 @@ client.on("channelCreate", async channel => {
     executor.id,
     "Criação massiva de canais"
   );
+
+  await addSuspicion(channel.guild, executor.id, 25, "Criação rápida/suspeita de canal");
 });
 
 
@@ -1841,6 +2212,8 @@ client.on("roleCreate", async role => {
     executor.id,
     "Criação massiva de cargos"
   );
+
+  await addSuspicion(role.guild, executor.id, 25, "Criação rápida/suspeita de cargo");
 });
 // =====================================================
 // 25. EVENTO: BANIMENTO
@@ -1992,6 +2365,8 @@ client.on("guildMemberAdd", async member => {
         reason: "Security System Anti-Bot"
       }).catch(() => {});
 
+      addSecurityStat("botsBlocked");
+
       await sendLog(
         member.guild,
         "🤖 Bot bloqueado",
@@ -2004,6 +2379,8 @@ client.on("guildMemberAdd", async member => {
         executor.id,
         "Adição suspeita de bots"
       );
+
+      await addSuspicion(member.guild, executor.id, 30, "Adição suspeita de bot");
 
       return;
     }
@@ -2170,6 +2547,217 @@ client.on("roleUpdate", async (oldRole, newRole) => {
 });
 
 
+
+// =====================================================
+// 31. TICKETS / BOTÕES
+// =====================================================
+
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isButton()) return;
+  if (!interaction.guild) return;
+
+  const guild = interaction.guild;
+  const config = getConfig();
+
+  if (interaction.customId === "ticket_open") {
+    const category = await getOrCreateTicketCategory(guild);
+    const channelName = `ticket-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 90);
+
+    const existing = guild.channels.cache.find(c => c.name === channelName && c.parentId === category?.id);
+    if (existing) {
+      return interaction.reply({ ephemeral: true, content: `❌ Você já tem um ticket aberto: ${existing}` });
+    }
+
+    const channel = await guild.channels.create({
+      name: channelName,
+      type: ChannelType.GuildText,
+      parent: category?.id || null,
+      topic: `Ticket de ${interaction.user.id}`,
+      permissionOverwrites: [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+        { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ReadMessageHistory] }
+      ],
+      reason: "Ticket aberto"
+    }).catch(() => null);
+
+    if (!channel) {
+      return interaction.reply({ ephemeral: true, content: "❌ Não consegui criar o ticket. Verifique minhas permissões." });
+    }
+
+    addTicketStat("created");
+
+    const embed = new EmbedBuilder()
+      .setColor("Blue")
+      .setTitle("🎫 Ticket aberto")
+      .setDescription(`Olá <@${interaction.user.id}>! Explique seu problema.\n\nUm membro da equipe irá assumir seu atendimento.`)
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId("ticket_claim").setLabel("Assumir").setEmoji("🙋").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("ticket_close").setLabel("Fechar").setEmoji("🔒").setStyle(ButtonStyle.Danger)
+    );
+
+    await channel.send({ content: `<@${interaction.user.id}>`, embeds: [embed], components: [row] });
+    await sendLog(guild, "🎫 Ticket criado", `Usuário: <@${interaction.user.id}>\nCanal: ${channel}`, "Green");
+
+    return interaction.reply({ ephemeral: true, content: `✅ Ticket criado: ${channel}` });
+  }
+
+  if (interaction.customId === "ticket_claim") {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+      return interaction.reply({ ephemeral: true, content: "❌ Apenas equipe pode assumir tickets." });
+    }
+
+    addTicketStat("assumed");
+    await sendLog(guild, "🙋 Ticket assumido", `Staff: <@${interaction.user.id}>\nCanal: <#${interaction.channel.id}>`, "Blue");
+    return interaction.reply({ content: `🙋 Ticket assumido por <@${interaction.user.id}>.` });
+  }
+
+  if (interaction.customId === "ticket_close") {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+      return interaction.reply({ ephemeral: true, content: "❌ Apenas equipe pode fechar tickets." });
+    }
+
+    await interaction.reply({ ephemeral: true, content: "🔒 Fechando ticket e criando transcripts..." });
+
+    const files = await createTicketTranscript(interaction.channel, interaction.user.id);
+    const attachments = files.map(file => new AttachmentBuilder(file));
+
+    const logChannelId = config.ticketLogChannel || config.logChannel || process.env.LOG_CHANNEL_ID;
+    const logChannel = logChannelId ? guild.channels.cache.get(logChannelId) : null;
+
+    if (logChannel) {
+      await logChannel.send({
+        content: `🎫 Ticket fechado: **${interaction.channel.name}**\nFechado por: <@${interaction.user.id}>`,
+        files: attachments
+      }).catch(() => {});
+    }
+
+    addTicketStat("closed");
+
+    try {
+      const ownerId = interaction.channel.topic?.replace("Ticket de ", "");
+      const owner = ownerId ? await client.users.fetch(ownerId).catch(() => null) : null;
+      if (owner) {
+        const row = new ActionRowBuilder().addComponents(
+          [1, 2, 3, 4, 5].map(n =>
+            new ButtonBuilder().setCustomId(`ticket_rate_${n}`).setLabel(`${n}⭐`).setStyle(ButtonStyle.Secondary)
+          )
+        );
+        await owner.send({ content: "Como você avalia o atendimento do ticket?", components: [row] }).catch(() => {});
+      }
+    } catch {}
+
+    await interaction.channel.delete("Ticket fechado").catch(() => {});
+  }
+
+  if (interaction.customId.startsWith("ticket_rate_")) {
+    const rating = Number(interaction.customId.split("_").pop());
+    const stats = getTicketStats();
+    if (!stats.ratings) stats.ratings = [];
+    stats.ratings.push(rating);
+    saveJSON(TICKET_STATS_PATH, stats);
+    return interaction.reply({ ephemeral: true, content: `✅ Obrigado pela avaliação: ${rating}⭐` });
+  }
+});
+
+
+// =====================================================
+// 32. LOGS PREMIUM / PROTEÇÕES EXTRAS
+// =====================================================
+
+client.on("messageDelete", async message => {
+  if (!message.guild) return;
+  const config = getConfig();
+  if (!config.logsPremium || !config.logMessageDelete) return;
+
+  await sendLog(
+    message.guild,
+    "🗑️ Mensagem apagada",
+    `Autor: ${message.author ? `<@${message.author.id}>` : "Desconhecido"}\nCanal: <#${message.channel.id}>\n\nConteúdo:\n${message.content || "Sem conteúdo salvo."}`,
+    "Orange"
+  );
+});
+
+client.on("messageUpdate", async (oldMessage, newMessage) => {
+  if (!newMessage.guild) return;
+  if (oldMessage.content === newMessage.content) return;
+  const config = getConfig();
+  if (!config.logsPremium || !config.logMessageEdit) return;
+
+  await sendLog(
+    newMessage.guild,
+    "✏️ Mensagem editada",
+    `Usuário: <@${newMessage.author.id}>\nCanal: <#${newMessage.channel.id}>\n\nAntes:\n${oldMessage.content || "Vazio"}\n\nDepois:\n${newMessage.content || "Vazio"}`,
+    "Blue"
+  );
+});
+
+client.on("guildMemberUpdate", async (oldMember, newMember) => {
+  const config = getConfig();
+  if (!config.logsPremium) return;
+
+  if (config.logNickname && oldMember.nickname !== newMember.nickname) {
+    await sendLog(newMember.guild, "📝 Nickname alterado", `Usuário: <@${newMember.id}>\nAntes: ${oldMember.nickname || oldMember.user.username}\nDepois: ${newMember.nickname || newMember.user.username}`, "Blue");
+  }
+
+  if (config.logRoles) {
+    const added = newMember.roles.cache.filter(role => !oldMember.roles.cache.has(role.id));
+    const removed = oldMember.roles.cache.filter(role => !newMember.roles.cache.has(role.id));
+
+    if (added.size) await sendLog(newMember.guild, "➕ Cargo adicionado", `Usuário: <@${newMember.id}>\nCargo: ${added.map(r => `<@&${r.id}>`).join(", ")}`, "Green");
+    if (removed.size) await sendLog(newMember.guild, "➖ Cargo removido", `Usuário: <@${newMember.id}>\nCargo: ${removed.map(r => `<@&${r.id}>`).join(", ")}`, "Orange");
+  }
+});
+
+client.on("guildMemberAdd", async member => {
+  const config = getConfig();
+  if (!config.logsPremium || !config.logJoinLeave) return;
+  await sendLog(member.guild, "📥 Membro entrou", `Usuário: <@${member.id}>`, "Green");
+});
+
+client.on("guildMemberRemove", async member => {
+  const config = getConfig();
+  if (!config.logsPremium || !config.logJoinLeave) return;
+  await sendLog(member.guild, "📤 Membro saiu", `Usuário: <@${member.id}>`, "Orange");
+});
+
+client.on("emojiCreate", async emoji => {
+  const config = getConfig();
+  if (!config.logsPremium || !config.logEmoji) return;
+  await sendLog(emoji.guild, "😀 Emoji criado", `Emoji: ${emoji.name}`, "Green");
+});
+
+client.on("emojiDelete", async emoji => {
+  const config = getConfig();
+  if (!config.logsPremium || !config.logEmoji) return;
+  await sendLog(emoji.guild, "🗑️ Emoji deletado", `Emoji: ${emoji.name}`, "Red");
+});
+
+client.on("channelCreate", async channel => {
+  if (!channel.guild) return;
+  const config = getConfig();
+  if (!config.panic) return;
+
+  const executor = await getExecutor(channel.guild, AuditLogEvent.ChannelCreate);
+  if (!executor || executor.id === client.user.id || isWhitelisted(executor.id)) return;
+
+  await channel.delete("Modo pânico: criação de canal bloqueada").catch(() => {});
+  await addSuspicion(channel.guild, executor.id, 30, "Criou canal durante modo pânico");
+});
+
+client.on("roleCreate", async role => {
+  const config = getConfig();
+  if (!config.panic) return;
+
+  const executor = await getExecutor(role.guild, AuditLogEvent.RoleCreate);
+  if (!executor || executor.id === client.user.id || isWhitelisted(executor.id)) return;
+
+  await role.delete("Modo pânico: criação de cargo bloqueada").catch(() => {});
+  await addSuspicion(role.guild, executor.id, 30, "Criou cargo durante modo pânico");
+});
+
 // =====================================================
 // 31. BOT ONLINE
 // =====================================================
@@ -2179,6 +2767,15 @@ client.once("clientReady", async () => {
 
   try {
     await registerCommands();
+
+    setInterval(async () => {
+      const config = getConfig();
+      if (!config.autoBackup) return;
+
+      for (const guild of client.guilds.cache.values()) {
+        await createBackupHistory(guild).catch(() => {});
+      }
+    }, 15 * 60 * 1000);
   } catch (error) {
     console.error("❌ Erro ao registrar comandos:", error);
   }

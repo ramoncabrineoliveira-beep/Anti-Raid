@@ -1192,6 +1192,16 @@ client.on("channelDelete", async channel => {
   if (!executor) return;
   if (executor.id === client.user.id) return;
 
+  if (!(await canPunish(channel.guild, executor.id))) {
+  await sendLog(
+    channel.guild,
+    "⚠️ Ação ignorada",
+    `Usuário: <@${executor.id}>\nMotivo: usuário/cargo imune.\nAção: deletou canal, mas não será punido nem restaurado.`,
+    "Yellow"
+  );
+  return;
+}
+
   await sendLog(
     channel.guild,
     "🗑️ Canal deletado",
@@ -1259,6 +1269,16 @@ client.on("roleDelete", async role => {
   const executor = await getExecutor(role.guild, AuditLogEvent.RoleDelete);
   if (!executor) return;
   if (executor.id === client.user.id) return;
+
+  if (!(await canPunish(role.guild, executor.id))) {
+  await sendLog(
+    role.guild,
+    "⚠️ Ação ignorada",
+    `Usuário: <@${executor.id}>\nMotivo: usuário/cargo imune.\nAção: deletou cargo, mas não será punido nem restaurado.`,
+    "Yellow"
+  );
+  return;
+}
 
   await sendLog(
     role.guild,

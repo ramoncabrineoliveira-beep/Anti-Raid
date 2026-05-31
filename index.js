@@ -1278,7 +1278,7 @@ client.on("roleDelete", async role => {
     "Yellow"
   );
   return;
-}
+}})
 
   await sendLog(
     role.guild,
@@ -1293,15 +1293,23 @@ client.on("roleDelete", async role => {
     "Exclusão de cargos"
   );
 
-  await role.guild.roles.create({
-    name: role.name,
-    color: role.color,
-    hoist: role.hoist,
-    mentionable: role.mentionable,
-    permissions: role.permissions.bitfield,
-    reason: "Security System Backup"
-}).catch(err => console.log("Erro ao restaurar cargo:", err));
+ const newRole = await role.guild.roles.create({
+  name: role.name,
+  colors: { primaryColor: role.color },
+  hoist: role.hoist,
+  mentionable: role.mentionable,
+  permissions: role.permissions.bitfield,
+  reason: "Security System Backup"
+}).catch(err => {
+  console.log("Erro ao restaurar cargo:", err);
+  return null;
 });
+
+if (newRole) {
+  await newRole.setPosition(role.position).catch(err => {
+    console.log("Erro ao mover cargo:", err);
+  });
+}
 
 client.on("roleCreate", async role => {
   const config = getConfig();

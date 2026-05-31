@@ -1300,7 +1300,7 @@ client.on("roleDelete", async role => {
     mentionable: role.mentionable,
     permissions: role.permissions.bitfield,
     reason: "Security System Backup"
-  }).catch(() => {});
+}).catch(err => console.log("Erro ao restaurar cargo:", err));
 });
 
 client.on("roleCreate", async role => {

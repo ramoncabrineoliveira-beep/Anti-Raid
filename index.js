@@ -1,3 +1,7 @@
+// =====================================================
+// 1. IMPORTS E CLIENT
+// =====================================================
+
 require("dotenv").config();
 
 const fs = require("fs");
@@ -11,36 +15,40 @@ const {
   PermissionFlagsBits,
   EmbedBuilder,
   AuditLogEvent,
-  ChannelType,
-  PermissionsBitField
+  ChannelType
 } = require("discord.js");
 
 const client = new Client({
-intents: [
-  GatewayIntentBits.Guilds,
-  GatewayIntentBits.GuildMembers,
-  GatewayIntentBits.GuildModeration,
-  GatewayIntentBits.GuildMessages,
-  GatewayIntentBits.MessageContent
-],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ],
   partials: [Partials.Channel, Partials.Message]
 });
 
-if (!fs.existsSync("./data")) fs.mkdirSync("./data");
-if (!fs.existsSync("./backups")) fs.mkdirSync("./backups");
-if (!fs.existsSync("./transcripts")) fs.mkdirSync("./transcripts");
+
+// =====================================================
+// 2. PASTAS E ARQUIVOS
+// =====================================================
+
+["./data", "./backups", "./transcripts"].forEach(folder => {
+  if (!fs.existsSync(folder)) fs.mkdirSync(folder);
+});
 
 const CONFIG_PATH = "./data/config.json";
 const CASES_PATH = "./data/cases.json";
 const WARNS_PATH = "./data/warns.json";
+const RAID_BANS_PATH = "./data/raidbans.json";
 
-function createFile(path, data) {
-  if (!fs.existsSync(path)) {
-    fs.writeFileSync(path, JSON.stringify(data, null, 2));
-  }
-}
 
-createFile(CONFIG_PATH, {
+// =====================================================
+// 3. CONFIG PADRÃO
+// =====================================================
+
+const defaultConfig = {
   antiraid: true,
   antinuke: true,
   antispam: true,
@@ -49,27 +57,55 @@ createFile(CONFIG_PATH, {
   antibot: true,
   antiwebhook: true,
   antieveryone: true,
+
   antichannelcreate: true,
   antichanneldelete: true,
   antirolecreate: true,
   antiroledelete: true,
   antiban: true,
   antikick: true,
+
+  antialt: true,
+  antijoinraid: true,
+  antidangerousrole: true,
+
   botlock: false,
   webhooklock: false,
   lockdown: false,
   emergency: false,
+
   whitelist: [],
   blacklist: [],
   allowedBots: [],
-  logChannel: process.env.LOG_CHANNEL_ID || null
-});
+  immuneRoles: [],
+  immuneUsers: [],
 
+  altMinDays: 7,
+  joinRaidLimit: 5,
+  joinRaidTime: 10000,
+
+  quarantineRoleName: "Quarentena",
+  logChannel: process.env.LOG_CHANNEL_ID || null
+};
+
+
+// =====================================================
+// 4. FUNÇÕES JSON
+// =====================================================
+
+function createFile(path, data) {
+  if (!fs.existsSync(path)) {
+    fs.writeFileSync(path, JSON.stringify(data, null, 2));
+  }
+}
+
+createFile(CONFIG_PATH, defaultConfig);
 createFile(CASES_PATH, []);
 createFile(WARNS_PATH, {});
+createFile(RAID_BANS_PATH, []);
 
 function readJSON(path) {
-  return JSON.parse(fs.readFileSync(path));
+  return JSON.parse(fs.readFileSync(path, "utf8"));
 }
 
 function saveJSON(path, data) {
@@ -77,12 +113,23 @@ function saveJSON(path, data) {
 }
 
 function getConfig() {
-  return readJSON(CONFIG_PATH);
+  return {
+    ...defaultConfig,
+    ...readJSON(CONFIG_PATH)
+  };
 }
 
 function saveConfig(config) {
-  saveJSON(CONFIG_PATH, config);
+  saveJSON(CONFIG_PATH, {
+    ...defaultConfig,
+    ...config
+  });
 }
+
+
+// =====================================================
+// 5. FUNÇÕES GERAIS
+// =====================================================
 
 function nowBR() {
   return new Date().toLocaleString("pt-BR", {
@@ -99,21 +146,24 @@ function isWhitelisted(userId) {
   return isOwner(userId) || config.whitelist.includes(userId);
 }
 
-function addWhitelist(userId) {
+function updateArray(key, id, add = true) {
   const config = getConfig();
 
-  if (!config.whitelist.includes(userId)) {
-    config.whitelist.push(userId);
-    saveConfig(config);
+  if (!config[key]) config[key] = [];
+
+  if (add) {
+    config[key] = [...new Set([...config[key], id])];
+  } else {
+    config[key] = config[key].filter(item => item !== id);
   }
-}
 
-function removeWhitelist(userId) {
-  const config = getConfig();
-
-  config.whitelist = config.whitelist.filter(id => id !== userId);
   saveConfig(config);
 }
+
+
+// =====================================================
+// 6. LOGS
+// =====================================================
 
 async function sendLog(guild, title, description, color = "Red") {
   const config = getConfig();
@@ -134,6 +184,11 @@ async function sendLog(guild, title, description, color = "Red") {
   await channel.send({ embeds: [embed] }).catch(() => {});
 }
 
+
+// =====================================================
+// 7. AUDIT LOG
+// =====================================================
+
 async function getExecutor(guild, type) {
   const logs = await guild.fetchAuditLogs({
     type,
@@ -141,19 +196,26 @@ async function getExecutor(guild, type) {
   }).catch(() => null);
 
   const entry = logs?.entries?.first();
-  if (!entry) return null;
 
+  if (!entry) return null;
   if (Date.now() - entry.createdTimestamp > 10000) return null;
 
   return entry.executor;
 }
+
+
+// =====================================================
+// 8. SISTEMA DE PUNIÇÃO
+// =====================================================
+
 async function canPunish(guild, userId) {
   const config = getConfig();
 
-  if (userId === process.env.OWNER_ID) return false;
+  if (!userId) return false;
+  if (isOwner(userId)) return false;
   if (userId === guild.ownerId) return false;
-  if (config.whitelist?.includes(userId)) return false;
-  if (config.immuneUsers?.includes(userId)) return false;
+  if (config.whitelist.includes(userId)) return false;
+  if (config.immuneUsers.includes(userId)) return false;
 
   const member = await guild.members.fetch(userId).catch(() => null);
   const bot = guild.members.me;
@@ -161,30 +223,33 @@ async function canPunish(guild, userId) {
   if (!member || !bot) return false;
 
   const hasImmuneRole = member.roles.cache.some(role =>
-    config.immuneRoles?.includes(role.id)
+    config.immuneRoles.includes(role.id)
   );
 
   if (hasImmuneRole) return false;
 
-  if (member.roles.highest.position >= bot.roles.highest.position) return false;
+  if (member.roles.highest.position >= bot.roles.highest.position) {
+    return false;
+  }
 
   return true;
 }
 
 async function punish(guild, userId, reason) {
   if (!(await canPunish(guild, userId))) {
-    await sendLog(
+    return sendLog(
       guild,
       "⚠️ Punição ignorada",
-      `Usuário: <@${userId}>\nMotivo: protegido, whitelist ou cargo maior que o bot.\nAção: ${reason}`,
+      `Usuário: <@${userId}>\nMotivo: protegido, whitelist, imune ou cargo maior que o bot.\nAção: ${reason}`,
       "Yellow"
     );
-    return;
   }
 
   await guild.members.ban(userId, {
     reason: `Security System: ${reason}`
   }).catch(() => {});
+
+  await saveRaidBan(guild.id, userId, reason);
 
   await sendLog(
     guild,
@@ -193,6 +258,11 @@ async function punish(guild, userId, reason) {
     "Red"
   );
 }
+
+
+// =====================================================
+// 9. CASOS E RAID BANS
+// =====================================================
 
 function addCase(type, moderatorId, userId, reason) {
   const cases = readJSON(CASES_PATH);
@@ -212,8 +282,27 @@ function addCase(type, moderatorId, userId, reason) {
   return newCase;
 }
 
+async function saveRaidBan(guildId, userId, reason) {
+  const bans = readJSON(RAID_BANS_PATH);
+
+  bans.push({
+    guildId,
+    userId,
+    reason,
+    date: nowBR()
+  });
+
+  saveJSON(RAID_BANS_PATH, bans);
+}
+
+
+// =====================================================
+// 10. CONTADORES DE RAID / SPAM / JOIN
+// =====================================================
+
 const actionMap = new Map();
 const spamMap = new Map();
+const joinMap = new Map();
 
 const ACTION_LIMIT = 3;
 const ACTION_TIME = 10000;
@@ -223,7 +312,7 @@ async function registerDangerAction(guild, userId, reason) {
 
   const key = `${guild.id}-${userId}`;
   const old = actionMap.get(key) || [];
-  const filtered = old.filter(t => Date.now() - t < ACTION_TIME);
+  const filtered = old.filter(time => Date.now() - time < ACTION_TIME);
 
   filtered.push(Date.now());
   actionMap.set(key, filtered);
@@ -233,12 +322,78 @@ async function registerDangerAction(guild, userId, reason) {
     actionMap.delete(key);
   }
 }
+// =====================================================
+// 11. SISTEMA DE QUARENTENA
+// =====================================================
+
+async function getOrCreateQuarantineRole(guild) {
+  const config = getConfig();
+
+  let role = guild.roles.cache.find(
+    r => r.name === config.quarantineRoleName
+  );
+
+  if (!role) {
+    role = await guild.roles.create({
+      name: config.quarantineRoleName,
+      color: "DarkGrey",
+      permissions: [],
+      reason: "Sistema de Quarentena"
+    }).catch(() => null);
+  }
+
+  return role;
+}
+
+async function quarantineMember(member, reason) {
+  const role = await getOrCreateQuarantineRole(member.guild);
+
+  if (!role) return false;
+
+  await member.roles.set([role.id], reason).catch(() => null);
+
+  await sendLog(
+    member.guild,
+    "🚧 Usuário colocado em quarentena",
+    `Usuário: <@${member.id}>\nMotivo: ${reason}`,
+    "Yellow"
+  );
+
+  return true;
+}
+
+
+// =====================================================
+// 12. SISTEMA ANTI-CARGO PERIGOSO
+// =====================================================
+
+function hasDangerousPermissions(role) {
+  const dangerousPermissions = [
+    PermissionFlagsBits.Administrator,
+    PermissionFlagsBits.BanMembers,
+    PermissionFlagsBits.KickMembers,
+    PermissionFlagsBits.ManageGuild,
+    PermissionFlagsBits.ManageRoles,
+    PermissionFlagsBits.ManageChannels,
+    PermissionFlagsBits.ManageWebhooks
+  ];
+
+  return dangerousPermissions.some(permission =>
+    role.permissions.has(permission)
+  );
+}
+
+
+// =====================================================
+// 13. BACKUP COMPLETO DO SERVIDOR
+// =====================================================
 
 async function createBackup(guild) {
   const backup = {
     guildId: guild.id,
     guildName: guild.name,
     createdAt: nowBR(),
+
     roles: guild.roles.cache
       .filter(role => role.id !== guild.id && !role.managed)
       .map(role => ({
@@ -248,17 +403,21 @@ async function createBackup(guild) {
         hoist: role.hoist,
         mentionable: role.mentionable,
         position: role.position,
+        rawPosition: role.rawPosition,
         permissions: role.permissions.bitfield.toString()
       })),
+
     channels: guild.channels.cache.map(channel => ({
       id: channel.id,
       name: channel.name,
       type: channel.type,
       parentName: channel.parent?.name || null,
+      parentId: channel.parentId || null,
       position: channel.rawPosition,
       topic: channel.topic || null,
       nsfw: channel.nsfw || false,
       rateLimitPerUser: channel.rateLimitPerUser || 0,
+
       permissionOverwrites: channel.permissionOverwrites.cache.map(p => ({
         id: p.id,
         type: p.type,
@@ -272,47 +431,150 @@ async function createBackup(guild) {
   return backup;
 }
 
+
+// =====================================================
+// 14. RESTORE COMPLETO DO SERVIDOR
+// =====================================================
+
 async function restoreBackup(guild) {
   const path = `./backups/${guild.id}.json`;
+
   if (!fs.existsSync(path)) return false;
 
   const backup = readJSON(path);
 
-  for (const role of backup.roles.sort((a, b) => a.position - b.position)) {
-    const exists = guild.roles.cache.find(r => r.name === role.name);
-    if (exists) continue;
+  const roleMap = new Map();
 
-    await guild.roles.create({
-      name: role.name,
-      color: role.color,
-      hoist: role.hoist,
-      mentionable: role.mentionable,
-      permissions: BigInt(role.permissions),
-      reason: "Security System Restore"
-    }).catch(() => {});
+  for (const roleData of backup.roles.sort((a, b) => a.position - b.position)) {
+    let role = guild.roles.cache.find(r => r.name === roleData.name);
+
+    if (!role) {
+      role = await guild.roles.create({
+        name: roleData.name,
+        color: roleData.color,
+        hoist: roleData.hoist,
+        mentionable: roleData.mentionable,
+        permissions: BigInt(roleData.permissions),
+        reason: "Security System Restore"
+      }).catch(() => null);
+    }
+
+    if (role) {
+      await role.setPosition(roleData.position).catch(() => {});
+      roleMap.set(roleData.id, role.id);
+    }
   }
 
-  for (const channel of backup.channels.sort((a, b) => a.position - b.position)) {
-    const exists = guild.channels.cache.find(c => c.name === channel.name);
-    if (exists) continue;
+  for (const channelData of backup.channels.sort((a, b) => a.position - b.position)) {
+    let channel = guild.channels.cache.find(c => c.name === channelData.name);
 
-    const parent = channel.parentName
-      ? guild.channels.cache.find(c => c.name === channel.parentName)
+    if (channel) continue;
+
+    const parent = channelData.parentName
+      ? guild.channels.cache.find(c => c.name === channelData.parentName)
       : null;
 
-    await guild.channels.create({
-      name: channel.name,
-      type: channel.type,
+    const overwrites = channelData.permissionOverwrites.map(overwrite => ({
+      id: roleMap.get(overwrite.id) || overwrite.id,
+      type: overwrite.type,
+      allow: BigInt(overwrite.allow),
+      deny: BigInt(overwrite.deny)
+    }));
+
+    channel = await guild.channels.create({
+      name: channelData.name,
+      type: channelData.type,
       parent: parent?.id || null,
-      topic: channel.topic || null,
-      nsfw: channel.nsfw || false,
-      rateLimitPerUser: channel.rateLimitPerUser || 0,
+      topic: channelData.topic || null,
+      nsfw: channelData.nsfw || false,
+      rateLimitPerUser: channelData.rateLimitPerUser || 0,
+      permissionOverwrites: overwrites,
       reason: "Security System Restore"
-    }).catch(() => {});
+    }).catch(() => null);
+
+    if (channel) {
+      await channel.setPosition(channelData.position).catch(() => {});
+    }
   }
 
   return true;
-}function createToggleCommand(name, description) {
+}
+
+
+// =====================================================
+// 15. BACKUP INDIVIDUAL DE CARGO DELETADO
+// =====================================================
+
+async function restoreDeletedRole(role) {
+  const guild = role.guild;
+
+  const newRole = await guild.roles.create({
+    name: role.name,
+    color: role.color,
+    hoist: role.hoist,
+    mentionable: role.mentionable,
+    permissions: role.permissions.bitfield,
+    reason: "Security System Role Restore"
+  }).catch(() => null);
+
+  if (!newRole) return null;
+
+  await newRole.setPosition(role.position).catch(() => {});
+
+  await sendLog(
+    guild,
+    "♻️ Cargo restaurado",
+    `Cargo: **${role.name}**\nPermissões restauradas.\nPosição restaurada.`,
+    "Green"
+  );
+
+  return newRole;
+}
+
+
+// =====================================================
+// 16. BACKUP INDIVIDUAL DE CANAL DELETADO
+// =====================================================
+
+async function restoreDeletedChannel(channel) {
+  const guild = channel.guild;
+
+  const permissionOverwrites = channel.permissionOverwrites.cache.map(overwrite => ({
+    id: overwrite.id,
+    type: overwrite.type,
+    allow: overwrite.allow.bitfield,
+    deny: overwrite.deny.bitfield
+  }));
+
+  const newChannel = await guild.channels.create({
+    name: channel.name,
+    type: channel.type,
+    parent: channel.parentId || null,
+    topic: channel.topic || null,
+    nsfw: channel.nsfw || false,
+    rateLimitPerUser: channel.rateLimitPerUser || 0,
+    permissionOverwrites,
+    reason: "Security System Channel Restore"
+  }).catch(() => null);
+
+  if (!newChannel) return null;
+
+  await newChannel.setPosition(channel.rawPosition).catch(() => {});
+
+  await sendLog(
+    guild,
+    "♻️ Canal restaurado",
+    `Canal: **${channel.name}**\nPermissões e posição restauradas.`,
+    "Green"
+  );
+
+  return newChannel;
+}
+// =====================================================
+// 17. CRIADOR DE COMANDOS ON/OFF
+// =====================================================
+
+function toggleCommand(name, description) {
   return new SlashCommandBuilder()
     .setName(name)
     .setDescription(description)
@@ -329,68 +591,177 @@ async function restoreBackup(guild) {
     );
 }
 
+const toggleNames = [
+  "antiraid",
+  "antinuke",
+  "antispam",
+  "antiinvite",
+  "antilink",
+  "antibot",
+  "antiwebhook",
+  "antieveryone",
+  "antichannelcreate",
+  "antichanneldelete",
+  "antirolecreate",
+  "antiroledelete",
+  "antiban",
+  "antikick",
+  "antialt",
+  "antijoinraid",
+  "antidangerousrole",
+  "botlock",
+  "webhooklock"
+];
+
+
+// =====================================================
+// 18. LISTA DE COMANDOS
+// =====================================================
+
 const commands = [
 
+  // =====================
+  // IMUNIDADE
+  // =====================
+
   new SlashCommandBuilder()
-  .setName("addcargoimune")
-  .setDescription("Adiciona um cargo imune")
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-  .addRoleOption(option =>
-    option.setName("cargo").setDescription("Cargo").setRequired(true)
-  ),
+    .setName("addcargoimune")
+    .setDescription("Adiciona um cargo imune")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addRoleOption(option =>
+      option.setName("cargo").setDescription("Cargo").setRequired(true)
+    ),
 
-new SlashCommandBuilder()
-  .setName("remcargoimune")
-  .setDescription("Remove um cargo imune")
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-  .addRoleOption(option =>
-    option.setName("cargo").setDescription("Cargo").setRequired(true)
-  ),
+  new SlashCommandBuilder()
+    .setName("remcargoimune")
+    .setDescription("Remove um cargo imune")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addRoleOption(option =>
+      option.setName("cargo").setDescription("Cargo").setRequired(true)
+    ),
 
-new SlashCommandBuilder()
-  .setName("listacargoimune")
-  .setDescription("Lista cargos imunes")
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName("listacargoimune")
+    .setDescription("Lista cargos imunes")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
-new SlashCommandBuilder()
-  .setName("addpessoaimune")
-  .setDescription("Adiciona uma pessoa imune")
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-  .addUserOption(option =>
-    option.setName("usuario").setDescription("Usuário").setRequired(true)
-  ),
+  new SlashCommandBuilder()
+    .setName("addpessoaimune")
+    .setDescription("Adiciona uma pessoa imune")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(option =>
+      option.setName("usuario").setDescription("Usuário").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("rempessoaimune")
+    .setDescription("Remove uma pessoa imune")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(option =>
+      option.setName("usuario").setDescription("Usuário").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("listapessoaimune")
+    .setDescription("Lista pessoas imunes")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+  // =====================
+  // CONFIGURAÇÕES
+  // =====================
 
   new SlashCommandBuilder()
     .setName("security-status")
     .setDescription("Mostra o status da segurança")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
-  createToggleCommand("antiraid", "Ativa ou desativa o Anti-Raid"),
-  createToggleCommand("antinuke", "Ativa ou desativa o Anti-Nuke"),
-  createToggleCommand("antispam", "Ativa ou desativa o Anti-Spam"),
-  createToggleCommand("antiinvite", "Ativa ou desativa o Anti-Invite"),
-  createToggleCommand("antilink", "Ativa ou desativa o Anti-Link"),
-  createToggleCommand("antibot", "Ativa ou desativa o Anti-Bot"),
-  createToggleCommand("antiwebhook", "Ativa ou desativa o Anti-Webhook"),
-  createToggleCommand("antieveryone", "Ativa ou desativa o Anti-Everyone"),
-  createToggleCommand("antichannelcreate", "Proteção contra criação de canais"),
-  createToggleCommand("antichanneldelete", "Proteção contra exclusão de canais"),
-  createToggleCommand("antirolecreate", "Proteção contra criação de cargos"),
-  createToggleCommand("antiroledelete", "Proteção contra exclusão de cargos"),
-  createToggleCommand("antiban", "Proteção contra banimentos em massa"),
-  createToggleCommand("antikick", "Proteção contra expulsões em massa"),
-  createToggleCommand("botlock", "Bloqueia entrada de bots"),
-  createToggleCommand("webhooklock", "Bloqueia criação de webhooks"),
+  new SlashCommandBuilder()
+    .setName("setlog")
+    .setDescription("Define o canal de logs")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addChannelOption(option =>
+      option.setName("canal").setDescription("Canal de logs").setRequired(true)
+    ),
+
+
+  // =====================
+  // SISTEMAS ON/OFF
+  // =====================
+
+  toggleCommand("antiraid", "Ativa ou desativa o Anti-Raid"),
+  toggleCommand("antinuke", "Ativa ou desativa o Anti-Nuke"),
+  toggleCommand("antispam", "Ativa ou desativa o Anti-Spam"),
+  toggleCommand("antiinvite", "Ativa ou desativa o Anti-Invite"),
+  toggleCommand("antilink", "Ativa ou desativa o Anti-Link"),
+  toggleCommand("antibot", "Ativa ou desativa o Anti-Bot"),
+  toggleCommand("antiwebhook", "Ativa ou desativa o Anti-Webhook"),
+  toggleCommand("antieveryone", "Ativa ou desativa o Anti-Everyone"),
+  toggleCommand("antichannelcreate", "Proteção contra criação de canais"),
+  toggleCommand("antichanneldelete", "Proteção contra exclusão de canais"),
+  toggleCommand("antirolecreate", "Proteção contra criação de cargos"),
+  toggleCommand("antiroledelete", "Proteção contra exclusão de cargos"),
+  toggleCommand("antiban", "Proteção contra banimentos em massa"),
+  toggleCommand("antikick", "Proteção contra expulsões em massa"),
+  toggleCommand("antialt", "Ativa ou desativa o Anti-Alt"),
+  toggleCommand("antijoinraid", "Ativa ou desativa o Anti-Join Raid"),
+  toggleCommand("antidangerousrole", "Ativa ou desativa o Anti-Cargo Perigoso"),
+  toggleCommand("botlock", "Bloqueia entrada de bots"),
+  toggleCommand("webhooklock", "Bloqueia criação de webhooks"),
+
+
+  // =====================
+  // BOTS PERMITIDOS
+  // =====================
+
+  new SlashCommandBuilder()
+    .setName("allowbot")
+    .setDescription("Permite um bot específico entrar no servidor")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(option =>
+      option.setName("bot").setDescription("Bot permitido").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("removebot")
+    .setDescription("Remove um bot da lista permitida")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(option =>
+      option.setName("bot").setDescription("Bot").setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("listbots")
+    .setDescription("Lista bots permitidos")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+  // =====================
+  // BACKUP
+  // =====================
 
   new SlashCommandBuilder()
     .setName("backup")
-    .setDescription("Cria backup do servidor")
+    .setDescription("Cria backup completo do servidor")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
     .setName("restore")
-    .setDescription("Restaura backup do servidor")
+    .setDescription("Restaura backup completo do servidor")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+
+  // =====================
+  // RAID BANS
+  // =====================
+
+  new SlashCommandBuilder()
+    .setName("unbanallraid")
+    .setDescription("Desbane usuários banidos pelo anti-raid")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+      // =====================
+  // WHITELIST
+  // =====================
 
   new SlashCommandBuilder()
     .setName("whitelist")
@@ -415,6 +786,11 @@ new SlashCommandBuilder()
     .addSubcommand(sub =>
       sub.setName("list").setDescription("Listar whitelist")
     ),
+
+
+  // =====================
+  // MODERAÇÃO
+  // =====================
 
   new SlashCommandBuilder()
     .setName("ban")
@@ -479,6 +855,11 @@ new SlashCommandBuilder()
       option.setName("usuario").setDescription("Usuário").setRequired(true)
     ),
 
+
+  // =====================
+  // UTILIDADES
+  // =====================
+
   new SlashCommandBuilder()
     .setName("clear")
     .setDescription("Limpa mensagens")
@@ -535,6 +916,9 @@ new SlashCommandBuilder()
     .addStringOption(option =>
       option.setName("mensagem").setDescription("Mensagem").setRequired(true)
     ),
+      // =====================
+  // LOCKDOWN / EMERGÊNCIA
+  // =====================
 
   new SlashCommandBuilder()
     .setName("lockdown")
@@ -560,131 +944,68 @@ new SlashCommandBuilder()
     .setName("cases")
     .setDescription("Mostra casos registrados")
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
-    
+
+
+  // =====================
+  // CARGOS
+  // =====================
+
   new SlashCommandBuilder()
-  .setName("addcargo")
-  .setDescription("Adiciona um cargo a um usuário")
-  .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
-  .addUserOption(option =>
-    option.setName("usuario")
-      .setDescription("Usuário")
-      .setRequired(true)
-  )
-  .addRoleOption(option =>
-    option.setName("cargo")
-      .setDescription("Cargo")
-      .setRequired(true)
-  ),
+    .setName("addcargo")
+    .setDescription("Adiciona um cargo a um usuário")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+    .addUserOption(option =>
+      option.setName("usuario").setDescription("Usuário").setRequired(true)
+    )
+    .addRoleOption(option =>
+      option.setName("cargo").setDescription("Cargo").setRequired(true)
+    ),
 
-new SlashCommandBuilder()
-  .setName("removercargo")
-  .setDescription("Remove um cargo de um usuário")
-  .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
-  .addUserOption(option =>
-    option.setName("usuario")
-      .setDescription("Usuário")
-      .setRequired(true)
-  )
-  .addRoleOption(option =>
-    option.setName("cargo")
-      .setDescription("Cargo")
-      .setRequired(true)
-  ),
-
+  new SlashCommandBuilder()
+    .setName("removercargo")
+    .setDescription("Remove um cargo de um usuário")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles)
+    .addUserOption(option =>
+      option.setName("usuario").setDescription("Usuário").setRequired(true)
+    )
+    .addRoleOption(option =>
+      option.setName("cargo").setDescription("Cargo").setRequired(true)
+    )
 
 ].map(command => command.toJSON());
+
+
+// =====================================================
+// 19. REGISTRAR COMANDOS
+// =====================================================
 
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(process.env.BOT_TOKEN);
 
   await rest.put(
-
-    Routes.applicationCommands(
-  process.env.CLIENT_ID
-),
+    Routes.applicationCommands(process.env.CLIENT_ID),
     { body: commands }
   );
 
   console.log(`✅ ${commands.length} comandos registrados.`);
-  
 }
+// =====================================================
+// 20. INTERACTION CREATE
+// =====================================================
+
 client.on("interactionCreate", async interaction => {
-if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand()) return;
 
-const cmd = interaction.commandName;
-
-if (cmd === "addcargoimune") {
-  try {
-    const cargo = interaction.options.getRole("cargo");
-    const config = getConfig();
-
-    if (!config.immuneRoles) config.immuneRoles = [];
-
-    if (!config.immuneRoles.includes(cargo.id)) {
-      config.immuneRoles.push(cargo.id);
-      saveConfig(config);
-    }
-
-    return interaction.reply({
-      content: `✅ Cargo ${cargo} adicionado à lista de imunes.`,
-      ephemeral: true
-    });
-  } catch (err) {
-    console.error("Erro no addcargoimune:", err);
-
-    if (!interaction.replied) {
-      return interaction.reply({
-        content: "❌ Erro ao adicionar cargo imune. Veja o terminal.",
-        ephemeral: true
-      });
-    }
-  }
-}if (cmd === "remcargoimune") {
-  const cargo = interaction.options.getRole("cargo");
-  const config = getConfig();
-
-  config.immuneRoles = (config.immuneRoles || []).filter(id => id !== cargo.id);
-  saveConfig(config);
-
-  return interaction.reply({
-    content: `✅ Cargo ${cargo} removido da lista de imunes.`,
-    ephemeral: true
-  });
-}
-
-if (cmd === "listacargoimune") {
-  const config = getConfig();
-  const cargos = config.immuneRoles || [];
-
-  return interaction.reply({
-    content: cargos.length
-      ? `🛡️ Cargos imunes:\n${cargos.map(id => `<@&${id}>`).join("\n")}`
-      : "❌ Nenhum cargo imune cadastrado.",
-    ephemeral: true
-  });
-}
+  const cmd = interaction.commandName;
+  const guild = interaction.guild;
 
   try {
-    if (
-      [
-        "antiraid",
-        "antinuke",
-        "antispam",
-        "antiinvite",
-        "antilink",
-        "antibot",
-        "antiwebhook",
-        "antieveryone",
-        "antichannelcreate",
-        "antichanneldelete",
-        "antirolecreate",
-        "antiroledelete",
-        "antiban",
-        "antikick",
-        "botlock",
-        "webhooklock"
-      ].includes(cmd)
-    ) {
+
+    // ===================================
+    // COMANDOS ON/OFF
+    // ===================================
+
+    if (toggleNames.includes(cmd)) {
       const modo = interaction.options.getString("modo");
       const config = getConfig();
 
@@ -693,9 +1014,253 @@ if (cmd === "listacargoimune") {
 
       return interaction.reply({
         ephemeral: true,
-        content: `✅ **/${cmd}** foi ${modo === "on" ? "ativado" : "desativado"}.`
+        content: `✅ ${cmd} ${modo === "on" ? "ativado" : "desativado"}`
       });
     }
+
+
+    // ===================================
+    // SETLOG
+    // ===================================
+
+    if (cmd === "setlog") {
+      const canal = interaction.options.getChannel("canal");
+
+      const config = getConfig();
+      config.logChannel = canal.id;
+
+      saveConfig(config);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ Canal de logs definido para ${canal}`
+      });
+    }
+
+
+    // ===================================
+    // CARGOS IMUNES
+    // ===================================
+
+    if (cmd === "addcargoimune") {
+      const cargo = interaction.options.getRole("cargo");
+
+      updateArray("immuneRoles", cargo.id, true);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ Cargo ${cargo} adicionado aos imunes`
+      });
+    }
+
+    if (cmd === "remcargoimune") {
+      const cargo = interaction.options.getRole("cargo");
+
+      updateArray("immuneRoles", cargo.id, false);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ Cargo ${cargo} removido dos imunes`
+      });
+    }
+
+    if (cmd === "listacargoimune") {
+      const cargos = getConfig().immuneRoles || [];
+
+      return interaction.reply({
+        ephemeral: true,
+        content: cargos.length
+          ? cargos.map(id => `<@&${id}>`).join("\n")
+          : "Nenhum cargo imune."
+      });
+    }
+
+
+    // ===================================
+    // PESSOAS IMUNES
+    // ===================================
+
+    if (cmd === "addpessoaimune") {
+      const user = interaction.options.getUser("usuario");
+
+      updateArray("immuneUsers", user.id, true);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ ${user.tag} adicionado aos imunes`
+      });
+    }
+
+    if (cmd === "rempessoaimune") {
+      const user = interaction.options.getUser("usuario");
+
+      updateArray("immuneUsers", user.id, false);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ ${user.tag} removido dos imunes`
+      });
+    }
+
+    if (cmd === "listapessoaimune") {
+      const users = getConfig().immuneUsers || [];
+
+      return interaction.reply({
+        ephemeral: true,
+        content: users.length
+          ? users.map(id => `<@${id}>`).join("\n")
+          : "Nenhum usuário imune."
+      });
+    }
+
+
+    // ===================================
+    // BOTS PERMITIDOS
+    // ===================================
+
+    if (cmd === "allowbot") {
+      const bot = interaction.options.getUser("bot");
+
+      updateArray("allowedBots", bot.id, true);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ Bot ${bot.tag} autorizado`
+      });
+    }
+
+    if (cmd === "removebot") {
+      const bot = interaction.options.getUser("bot");
+
+      updateArray("allowedBots", bot.id, false);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ Bot ${bot.tag} removido`
+      });
+    }
+
+    if (cmd === "listbots") {
+      const bots = getConfig().allowedBots || [];
+
+      return interaction.reply({
+        ephemeral: true,
+        content: bots.length
+          ? bots.map(id => `<@${id}>`).join("\n")
+          : "Nenhum bot autorizado."
+      });
+    }
+
+
+    // ===================================
+    // WHITELIST
+    // ===================================
+
+    if (cmd === "whitelist") {
+
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === "add") {
+        const user = interaction.options.getUser("usuario");
+
+        updateArray("whitelist", user.id, true);
+
+        return interaction.reply({
+          ephemeral: true,
+          content: `✅ ${user.tag} adicionado à whitelist`
+        });
+      }
+
+      if (sub === "remove") {
+        const user = interaction.options.getUser("usuario");
+
+        updateArray("whitelist", user.id, false);
+
+        return interaction.reply({
+          ephemeral: true,
+          content: `✅ ${user.tag} removido da whitelist`
+        });
+      }
+
+      if (sub === "list") {
+        const list = getConfig().whitelist || [];
+
+        return interaction.reply({
+          ephemeral: true,
+          content: list.length
+            ? list.map(id => `<@${id}>`).join("\n")
+            : "Whitelist vazia."
+        });
+      }
+    }
+        // ===================================
+    // BACKUP / RESTORE
+    // ===================================
+
+    if (cmd === "backup") {
+      await createBackup(guild);
+
+      await sendLog(
+        guild,
+        "📦 Backup criado",
+        `Criado por: <@${interaction.user.id}>`,
+        "Green"
+      );
+
+      return interaction.reply({
+        ephemeral: true,
+        content: "✅ Backup completo criado."
+      });
+    }
+
+    if (cmd === "restore") {
+      const ok = await restoreBackup(guild);
+
+      return interaction.reply({
+        ephemeral: true,
+        content: ok
+          ? "✅ Restore completo iniciado."
+          : "❌ Nenhum backup encontrado."
+      });
+    }
+
+
+    // ===================================
+    // UNBAN ALL RAID
+    // ===================================
+
+    if (cmd === "unbanallraid") {
+      const raidBans = readJSON(RAID_BANS_PATH).filter(
+        ban => ban.guildId === guild.id
+      );
+
+      let success = 0;
+      let fail = 0;
+
+      for (const ban of raidBans) {
+        try {
+          await guild.members.unban(ban.userId, "Unban geral de raid");
+          success++;
+        } catch {
+          fail++;
+        }
+      }
+
+      saveJSON(
+        RAID_BANS_PATH,
+        readJSON(RAID_BANS_PATH).filter(ban => ban.guildId !== guild.id)
+      );
+
+      return interaction.reply({
+        ephemeral: true,
+        content: `✅ Unban de raid finalizado.\nSucesso: ${success}\nFalhas: ${fail}`
+      });
+    }
+
+
+    // ===================================
+    // STATUS
+    // ===================================
 
     if (cmd === "security-status") {
       const config = getConfig();
@@ -712,83 +1277,30 @@ if (cmd === "listacargoimune") {
           `Anti-Bot: ${config.antibot ? "✅" : "❌"}\n` +
           `Anti-Webhook: ${config.antiwebhook ? "✅" : "❌"}\n` +
           `Anti-Everyone: ${config.antieveryone ? "✅" : "❌"}\n` +
-          `Whitelist: ${config.whitelist.length} usuário(s)`
+          `Anti-Alt: ${config.antialt ? "✅" : "❌"}\n` +
+          `Anti-Join Raid: ${config.antijoinraid ? "✅" : "❌"}\n` +
+          `Anti-Cargo Perigoso: ${config.antidangerousrole ? "✅" : "❌"}\n\n` +
+          `Whitelist: ${config.whitelist.length}\n` +
+          `Cargos imunes: ${config.immuneRoles.length}\n` +
+          `Pessoas imunes: ${config.immuneUsers.length}\n` +
+          `Bots permitidos: ${config.allowedBots.length}`
       });
     }
 
-    if (cmd === "backup") {
-      await createBackup(interaction.guild);
 
-      await sendLog(
-        interaction.guild,
-        "📦 Backup criado",
-        `Criado por: <@${interaction.user.id}>`,
-        "Green"
-      );
-
-      return interaction.reply({
-        ephemeral: true,
-        content: "✅ Backup criado com sucesso."
-      });
-    }
-
-    if (cmd === "restore") {
-      const ok = await restoreBackup(interaction.guild);
-
-      return interaction.reply({
-        ephemeral: true,
-        content: ok
-          ? "✅ Restore iniciado com sucesso."
-          : "❌ Nenhum backup encontrado."
-      });
-    }
-
-    if (cmd === "whitelist") {
-      const sub = interaction.options.getSubcommand();
-
-      if (sub === "add") {
-        const user = interaction.options.getUser("usuario");
-        addWhitelist(user.id);
-
-        return interaction.reply({
-          ephemeral: true,
-          content: `✅ <@${user.id}> adicionado na whitelist.`
-        });
-      }
-
-      if (sub === "remove") {
-        const user = interaction.options.getUser("usuario");
-        removeWhitelist(user.id);
-
-        return interaction.reply({
-          ephemeral: true,
-          content: `✅ <@${user.id}> removido da whitelist.`
-        });
-      }
-
-      if (sub === "list") {
-        const config = getConfig();
-
-        return interaction.reply({
-          ephemeral: true,
-          content:
-            config.whitelist.length === 0
-              ? "Whitelist vazia."
-              : config.whitelist.map(id => `<@${id}>`).join("\n")
-        });
-      }
-    }
+    // ===================================
+    // BAN
+    // ===================================
 
     if (cmd === "ban") {
       const user = interaction.options.getUser("usuario");
       const reason = interaction.options.getString("motivo") || "Sem motivo";
 
-      await interaction.guild.members.ban(user.id, { reason }).catch(() => {});
-
+      await guild.members.ban(user.id, { reason }).catch(() => {});
       addCase("BAN", interaction.user.id, user.id, reason);
 
       await sendLog(
-        interaction.guild,
+        guild,
         "🔨 Usuário banido",
         `Moderador: <@${interaction.user.id}>\nUsuário: <@${user.id}>\nMotivo: ${reason}`,
         "Red"
@@ -800,10 +1312,15 @@ if (cmd === "listacargoimune") {
       });
     }
 
+
+    // ===================================
+    // KICK
+    // ===================================
+
     if (cmd === "kick") {
       const user = interaction.options.getUser("usuario");
       const reason = interaction.options.getString("motivo") || "Sem motivo";
-      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      const member = await guild.members.fetch(user.id).catch(() => null);
 
       if (!member) {
         return interaction.reply({
@@ -813,11 +1330,10 @@ if (cmd === "listacargoimune") {
       }
 
       await member.kick(reason).catch(() => {});
-
       addCase("KICK", interaction.user.id, user.id, reason);
 
       await sendLog(
-        interaction.guild,
+        guild,
         "👢 Usuário expulso",
         `Moderador: <@${interaction.user.id}>\nUsuário: <@${user.id}>\nMotivo: ${reason}`,
         "Orange"
@@ -829,11 +1345,16 @@ if (cmd === "listacargoimune") {
       });
     }
 
+
+    // ===================================
+    // TIMEOUT
+    // ===================================
+
     if (cmd === "timeout") {
       const user = interaction.options.getUser("usuario");
       const minutes = interaction.options.getInteger("minutos");
       const reason = interaction.options.getString("motivo") || "Sem motivo";
-      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      const member = await guild.members.fetch(user.id).catch(() => null);
 
       if (!member) {
         return interaction.reply({
@@ -843,7 +1364,6 @@ if (cmd === "listacargoimune") {
       }
 
       await member.timeout(minutes * 60 * 1000, reason).catch(() => {});
-
       addCase("TIMEOUT", interaction.user.id, user.id, reason);
 
       return interaction.reply({
@@ -852,9 +1372,14 @@ if (cmd === "listacargoimune") {
       });
     }
 
+
+    // ===================================
+    // UNTIMEOUT
+    // ===================================
+
     if (cmd === "untimeout") {
       const user = interaction.options.getUser("usuario");
-      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      const member = await guild.members.fetch(user.id).catch(() => null);
 
       if (!member) {
         return interaction.reply({
@@ -870,6 +1395,11 @@ if (cmd === "listacargoimune") {
         content: `✅ Timeout removido de <@${user.id}>.`
       });
     }
+
+
+    // ===================================
+    // WARN / WARNINGS
+    // ===================================
 
     if (cmd === "warn") {
       const user = interaction.options.getUser("usuario");
@@ -898,22 +1428,47 @@ if (cmd === "listacargoimune") {
       const warns = readJSON(WARNS_PATH);
       const userWarns = warns[user.id] || [];
 
-      if (userWarns.length === 0) {
+      return interaction.reply({
+        ephemeral: true,
+        content: userWarns.length
+          ? `⚠️ Avisos de <@${user.id}>:\n\n${userWarns
+              .map((w, index) => `**${index + 1}.** ${w.reason} — ${w.date}`)
+              .join("\n")}`
+          : "✅ Esse usuário não possui avisos."
+      });
+    }
+
+
+    // ===================================
+    // ADDCARGO / REMOVERCARGO
+    // ===================================
+
+    if (cmd === "addcargo" || cmd === "removercargo") {
+      const user = interaction.options.getUser("usuario");
+      const cargo = interaction.options.getRole("cargo");
+      const member = await guild.members.fetch(user.id).catch(() => null);
+
+      if (!member) {
         return interaction.reply({
           ephemeral: true,
-          content: "✅ Esse usuário não possui avisos."
+          content: "❌ Usuário não encontrado."
         });
+      }
+
+      if (cmd === "addcargo") {
+        await member.roles.add(cargo).catch(() => {});
+      } else {
+        await member.roles.remove(cargo).catch(() => {});
       }
 
       return interaction.reply({
         ephemeral: true,
-        content:
-          `⚠️ Avisos de <@${user.id}>:\n\n` +
-          userWarns
-            .map((w, i) => `**${i + 1}.** ${w.reason} — ${w.date}`)
-            .join("\n")
+        content: `✅ Cargo ${cargo} ${cmd === "addcargo" ? "adicionado em" : "removido de"} <@${user.id}>.`
       });
     }
+        // ===================================
+    // CLEAR
+    // ===================================
 
     if (cmd === "clear") {
       const amount = interaction.options.getInteger("quantidade");
@@ -933,27 +1488,26 @@ if (cmd === "listacargoimune") {
       });
     }
 
-    if (cmd === "lock") {
+
+    // ===================================
+    // LOCK / UNLOCK
+    // ===================================
+
+    if (cmd === "lock" || cmd === "unlock") {
       await interaction.channel.permissionOverwrites.edit(
-        interaction.guild.roles.everyone,
-        { SendMessages: false }
+        guild.roles.everyone,
+        { SendMessages: cmd === "unlock" }
       );
 
       return interaction.reply({
-        content: "🔒 Canal bloqueado."
+        content: cmd === "lock" ? "🔒 Canal bloqueado." : "🔓 Canal desbloqueado."
       });
     }
 
-    if (cmd === "unlock") {
-      await interaction.channel.permissionOverwrites.edit(
-        interaction.guild.roles.everyone,
-        { SendMessages: true }
-      );
 
-      return interaction.reply({
-        content: "🔓 Canal desbloqueado."
-      });
-    }
+    // ===================================
+    // SLOWMODE
+    // ===================================
 
     if (cmd === "slowmode") {
       const seconds = interaction.options.getInteger("segundos");
@@ -966,20 +1520,30 @@ if (cmd === "listacargoimune") {
       });
     }
 
+
+    // ===================================
+    // SERVERINFO
+    // ===================================
+
     if (cmd === "serverinfo") {
       return interaction.reply({
         ephemeral: true,
         content:
-          `🏰 **Servidor:** ${interaction.guild.name}\n` +
-          `👥 Membros: ${interaction.guild.memberCount}\n` +
-          `📁 Canais: ${interaction.guild.channels.cache.size}\n` +
-          `🎭 Cargos: ${interaction.guild.roles.cache.size}`
+          `🏰 **Servidor:** ${guild.name}\n` +
+          `👥 Membros: ${guild.memberCount}\n` +
+          `📁 Canais: ${guild.channels.cache.size}\n` +
+          `🎭 Cargos: ${guild.roles.cache.size}`
       });
     }
 
+
+    // ===================================
+    // USERINFO
+    // ===================================
+
     if (cmd === "userinfo") {
       const user = interaction.options.getUser("usuario") || interaction.user;
-      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      const member = await guild.members.fetch(user.id).catch(() => null);
 
       return interaction.reply({
         ephemeral: true,
@@ -991,12 +1555,22 @@ if (cmd === "listacargoimune") {
       });
     }
 
+
+    // ===================================
+    // PING
+    // ===================================
+
     if (cmd === "ping") {
       return interaction.reply({
         ephemeral: true,
         content: `🏓 Pong! Ping: ${client.ws.ping}ms`
       });
     }
+
+
+    // ===================================
+    // SAY
+    // ===================================
 
     if (cmd === "say") {
       const msg = interaction.options.getString("mensagem");
@@ -1008,6 +1582,11 @@ if (cmd === "listacargoimune") {
         content: "✅ Mensagem enviada."
       });
     }
+
+
+    // ===================================
+    // ANNOUNCE
+    // ===================================
 
     if (cmd === "announce") {
       const msg = interaction.options.getString("mensagem");
@@ -1026,155 +1605,98 @@ if (cmd === "listacargoimune") {
       });
     }
 
-if (cmd === "lockdown") {
-  await interaction.deferReply({ ephemeral: true });
 
-  const channels = interaction.guild.channels.cache.filter(
-    c => c.type === ChannelType.GuildText
-  );
+    // ===================================
+    // LOCKDOWN / UNLOCKDOWN
+    // ===================================
 
-  let success = 0;
-  let fail = 0;
+    if (cmd === "lockdown" || cmd === "unlockdown") {
+      await interaction.deferReply({ ephemeral: true });
 
-  for (const channel of channels.values()) {
-    try {
-      await channel.permissionOverwrites.edit(
-        interaction.guild.roles.everyone,
-        { SendMessages: false },
-        { reason: "Lockdown ativado" }
+      const lock = cmd === "lockdown";
+      let success = 0;
+      let fail = 0;
+
+      const channels = guild.channels.cache.filter(
+        channel => channel.type === ChannelType.GuildText
       );
-      success++;
-    } catch {
-      fail++;
+
+      for (const channel of channels.values()) {
+        try {
+          await channel.permissionOverwrites.edit(
+            guild.roles.everyone,
+            { SendMessages: lock ? false : null },
+            { reason: lock ? "Lockdown ativado" : "Lockdown removido" }
+          );
+          success++;
+        } catch {
+          fail++;
+        }
+      }
+
+      return interaction.editReply({
+        content:
+          `${lock ? "🔒 Lockdown ativado." : "🔓 Lockdown removido."}\n` +
+          `✅ Sucesso: ${success}\n` +
+          `❌ Falhas: ${fail}`
+      });
     }
-  }
 
-  return interaction.editReply({
-    content: `🔒 Lockdown ativado.\n✅ Canais bloqueados: ${success}\n❌ Falhas: ${fail}`
-  });
-}
-if (cmd === "unlockdown") {
-  await interaction.deferReply({ ephemeral: true });
 
-  const channels = interaction.guild.channels.cache.filter(
-    c => c.type === ChannelType.GuildText
-  );
+    // ===================================
+    // EMERGENCY / UNEMERGENCY
+    // ===================================
 
-  let success = 0;
-  let fail = 0;
-
-  for (const channel of channels.values()) {
-    try {
-      await channel.permissionOverwrites.edit(
-        interaction.guild.roles.everyone,
-        { SendMessages: null },
-        { reason: "Lockdown removido" }
-      );
-      success++;
-    } catch {
-      fail++;
-    }
-  }
-  return interaction.editReply({
-    content: `🔓 Lockdown removido.\n✅ Canais desbloqueados: ${success}\n❌ Falhas: ${fail}`
-  });
-if (cmd === "addcargoimune") {
-  const cargo = interaction.options.getRole("cargo");
-  const config = getConfig();
-
-  if (!config.immuneRoles) config.immuneRoles = [];
-
-  if (!config.immuneRoles.includes(cargo.id)) {
-    config.immuneRoles.push(cargo.id);
-    saveConfig(config);
-  }
-
-  return interaction.reply({
-    content: `✅ Cargo ${cargo} adicionado à lista de imunes.`,
-    ephemeral: true
-  });
-}
-
-  if (cmd === "listarcargosimunes") {
-  const config = getConfig();
-  const cargos = config.immuneRoles || [];
-
-  return interaction.reply({
-    content: cargos.length
-      ? cargos.map(id => `<@&${id}>`).join("\n")
-      : "Nenhum cargo imune cadastrado.",
-    ephemeral: true
-  });
-}
-if (cmd === "removercargoimune") {
-  const cargo = interaction.options.getRole("cargo");
-  const config = getConfig();
-
-  config.immuneRoles = (config.immuneRoles || []).filter(id => id !== cargo.id);
-  saveConfig(config);
-
-  return interaction.reply({
-    content: `✅ Cargo ${cargo} removido da lista de imunes.`,
-    ephemeral: true
-  });
-}
-}
-
-    if (cmd === "emergency") {
+    if (cmd === "emergency" || cmd === "unemergency") {
       const config = getConfig();
 
-      config.emergency = true;
-      config.antiraid = true;
-      config.antinuke = true;
-      config.antispam = true;
-      config.antibot = true;
-      config.antiwebhook = true;
-      config.antieveryone = true;
+      if (cmd === "emergency") {
+        config.emergency = true;
+        config.antiraid = true;
+        config.antinuke = true;
+        config.antispam = true;
+        config.antibot = true;
+        config.antiwebhook = true;
+        config.antieveryone = true;
+        config.antijoinraid = true;
+        config.antidangerousrole = true;
+      } else {
+        config.emergency = false;
+      }
 
       saveConfig(config);
 
       return interaction.reply({
         ephemeral: true,
-        content: "🚨 Modo emergência ativado. Proteções principais ligadas."
+        content: cmd === "emergency"
+          ? "🚨 Modo emergência ativado. Proteções principais ligadas."
+          : "✅ Modo emergência desativado."
       });
     }
 
-    if (cmd === "unemergency") {
-      const config = getConfig();
 
-      config.emergency = false;
-      saveConfig(config);
-
-      return interaction.reply({
-        ephemeral: true,
-        content: "✅ Modo emergência desativado."
-      });
-    }
+    // ===================================
+    // CASES
+    // ===================================
 
     if (cmd === "cases") {
       const cases = readJSON(CASES_PATH);
 
-      if (cases.length === 0) {
-        return interaction.reply({
-          ephemeral: true,
-          content: "Nenhum caso registrado."
-        });
-      }
-
       return interaction.reply({
         ephemeral: true,
-        content: cases
-          .slice(-10)
-          .map(c =>
-            `#${c.id} **${c.type}** | Usuário: <@${c.userId}> | Motivo: ${c.reason}`
-          )
-          .join("\n")
+        content: cases.length
+          ? cases
+              .slice(-10)
+              .map(c => `#${c.id} **${c.type}** | Usuário: <@${c.userId}> | Motivo: ${c.reason}`)
+              .join("\n")
+          : "Nenhum caso registrado."
       });
     }
+
   } catch (error) {
     console.error(error);
 
-    if (!interaction.replied) {
+    if (!interaction.replied && !interaction.deferred) {
       return interaction.reply({
         ephemeral: true,
         content: "❌ Ocorreu um erro ao executar esse comando."
@@ -1182,6 +1704,10 @@ if (cmd === "removercargoimune") {
     }
   }
 });
+// =====================================================
+// 21. EVENTO: CANAL DELETADO
+// =====================================================
+
 client.on("channelDelete", async channel => {
   if (!channel.guild) return;
 
@@ -1189,18 +1715,18 @@ client.on("channelDelete", async channel => {
   if (!config.antinuke && !config.antichanneldelete) return;
 
   const executor = await getExecutor(channel.guild, AuditLogEvent.ChannelDelete);
+
   if (!executor) return;
   if (executor.id === client.user.id) return;
 
   if (!(await canPunish(channel.guild, executor.id))) {
-  await sendLog(
-    channel.guild,
-    "⚠️ Ação ignorada",
-    `Usuário: <@${executor.id}>\nMotivo: usuário/cargo imune.\nAção: deletou canal, mas não será punido nem restaurado.`,
-    "Yellow"
-  );
-  return;
-}
+    return sendLog(
+      channel.guild,
+      "⚠️ Ação ignorada",
+      `Usuário: <@${executor.id}>\nMotivo: usuário/cargo imune.\nAção: deletou canal, mas não será punido nem restaurado.`,
+      "Yellow"
+    );
+  }
 
   await sendLog(
     channel.guild,
@@ -1215,27 +1741,13 @@ client.on("channelDelete", async channel => {
     "Exclusão de canais/categorias"
   );
 
-  if (channel.type === ChannelType.GuildCategory) {
-    await channel.guild.channels.create({
-      name: channel.name,
-      type: ChannelType.GuildCategory,
-      position: channel.rawPosition,
-      reason: "Security System Backup"
-    }).catch(() => {});
-    return;
-  }
-
-  await channel.guild.channels.create({
-    name: channel.name,
-    type: channel.type,
-    parent: channel.parentId || null,
-    topic: channel.topic || null,
-    nsfw: channel.nsfw || false,
-    rateLimitPerUser: channel.rateLimitPerUser || 0,
-    position: channel.rawPosition,
-    reason: "Security System Backup"
-  }).catch(() => {});
+  await restoreDeletedChannel(channel);
 });
+
+
+// =====================================================
+// 22. EVENTO: CANAL CRIADO
+// =====================================================
 
 client.on("channelCreate", async channel => {
   if (!channel.guild) return;
@@ -1244,6 +1756,7 @@ client.on("channelCreate", async channel => {
   if (!config.antinuke && !config.antichannelcreate) return;
 
   const executor = await getExecutor(channel.guild, AuditLogEvent.ChannelCreate);
+
   if (!executor) return;
   if (executor.id === client.user.id) return;
   if (isWhitelisted(executor.id)) return;
@@ -1262,23 +1775,28 @@ client.on("channelCreate", async channel => {
   );
 });
 
+
+// =====================================================
+// 23. EVENTO: CARGO DELETADO
+// =====================================================
+
 client.on("roleDelete", async role => {
   const config = getConfig();
   if (!config.antinuke && !config.antiroledelete) return;
 
   const executor = await getExecutor(role.guild, AuditLogEvent.RoleDelete);
+
   if (!executor) return;
   if (executor.id === client.user.id) return;
 
   if (!(await canPunish(role.guild, executor.id))) {
-  await sendLog(
-    role.guild,
-    "⚠️ Ação ignorada",
-    `Usuário: <@${executor.id}>\nMotivo: usuário/cargo imune.\nAção: deletou cargo, mas não será punido nem restaurado.`,
-    "Yellow"
-  );
-  return;
-}})
+    return sendLog(
+      role.guild,
+      "⚠️ Ação ignorada",
+      `Usuário: <@${executor.id}>\nMotivo: usuário/cargo imune.\nAção: deletou cargo, mas não será punido nem restaurado.`,
+      "Yellow"
+    );
+  }
 
   await sendLog(
     role.guild,
@@ -1293,29 +1811,20 @@ client.on("roleDelete", async role => {
     "Exclusão de cargos"
   );
 
- const newRole = await role.guild.roles.create({
-  name: role.name,
-  colors: { primaryColor: role.color },
-  hoist: role.hoist,
-  mentionable: role.mentionable,
-  permissions: role.permissions.bitfield,
-  reason: "Security System Backup"
-}).catch(err => {
-  console.log("Erro ao restaurar cargo:", err);
-  return null;
+  await restoreDeletedRole(role);
 });
 
-if (newRole) {
-  await newRole.setPosition(role.position).catch(err => {
-    console.log("Erro ao mover cargo:", err);
-  });
-}
+
+// =====================================================
+// 24. EVENTO: CARGO CRIADO
+// =====================================================
 
 client.on("roleCreate", async role => {
   const config = getConfig();
   if (!config.antinuke && !config.antirolecreate) return;
 
   const executor = await getExecutor(role.guild, AuditLogEvent.RoleCreate);
+
   if (!executor) return;
   if (executor.id === client.user.id) return;
   if (isWhitelisted(executor.id)) return;
@@ -1333,12 +1842,17 @@ client.on("roleCreate", async role => {
     "Criação massiva de cargos"
   );
 });
+// =====================================================
+// 25. EVENTO: BANIMENTO
+// =====================================================
 
 client.on("guildBanAdd", async ban => {
   const config = getConfig();
+
   if (!config.antiraid && !config.antiban) return;
 
   const executor = await getExecutor(ban.guild, AuditLogEvent.MemberBanAdd);
+
   if (!executor) return;
   if (executor.id === client.user.id) return;
   if (isWhitelisted(executor.id)) return;
@@ -1357,11 +1871,18 @@ client.on("guildBanAdd", async ban => {
   );
 });
 
+
+// =====================================================
+// 26. EVENTO: KICK
+// =====================================================
+
 client.on("guildMemberRemove", async member => {
   const config = getConfig();
+
   if (!config.antikick) return;
 
   const executor = await getExecutor(member.guild, AuditLogEvent.MemberKick);
+
   if (!executor) return;
   if (executor.id === client.user.id) return;
   if (isWhitelisted(executor.id)) return;
@@ -1380,19 +1901,25 @@ client.on("guildMemberRemove", async member => {
   );
 });
 
+
+// =====================================================
+// 27. EVENTO: WEBHOOK
+// =====================================================
+
 client.on("webhookUpdate", async channel => {
   if (!channel.guild) return;
 
   const config = getConfig();
+
   if (!config.antiwebhook && !config.webhooklock) return;
 
   const executor =
     await getExecutor(channel.guild, AuditLogEvent.WebhookCreate) ||
     await getExecutor(channel.guild, AuditLogEvent.WebhookUpdate);
 
-if (!executor) return;
-if (executor.id === client.user.id) return;
-if (isWhitelisted(executor.id)) return;
+  if (!executor) return;
+  if (executor.id === client.user.id) return;
+  if (isWhitelisted(executor.id)) return;
 
   await sendLog(
     channel.guild,
@@ -1418,9 +1945,42 @@ if (isWhitelisted(executor.id)) return;
   }
 });
 
+
+// =====================================================
+// 28. EVENTO: BOT / ANTI-ALT / ANTI-JOIN RAID
+// =====================================================
+
 client.on("guildMemberAdd", async member => {
   const config = getConfig();
 
+  // ANTI-JOIN RAID
+  if (config.antijoinraid) {
+    const key = member.guild.id;
+    const old = joinMap.get(key) || [];
+    const filtered = old.filter(time => Date.now() - time < config.joinRaidTime);
+
+    filtered.push(Date.now());
+    joinMap.set(key, filtered);
+
+    if (filtered.length >= config.joinRaidLimit) {
+      config.emergency = true;
+      config.antiraid = true;
+      config.antinuke = true;
+      config.antispam = true;
+      config.antibot = true;
+      config.antieveryone = true;
+      saveConfig(config);
+
+      await sendLog(
+        member.guild,
+        "🚨 Anti-Join Raid ativado",
+        `Entraram **${filtered.length} membros** em pouco tempo.\nModo emergência ativado automaticamente.`,
+        "Red"
+      );
+    }
+  }
+
+  // ANTI-BOT
   if (member.user.bot && (config.antibot || config.botlock)) {
     const executor = await getExecutor(member.guild, AuditLogEvent.BotAdd);
 
@@ -1444,82 +2004,108 @@ client.on("guildMemberAdd", async member => {
         executor.id,
         "Adição suspeita de bots"
       );
+
+      return;
+    }
+  }
+
+  // ANTI-ALT
+  if (!member.user.bot && config.antialt) {
+    const accountAge = Date.now() - member.user.createdTimestamp;
+    const minAge = config.altMinDays * 24 * 60 * 60 * 1000;
+
+    if (accountAge < minAge) {
+      await quarantineMember(
+        member,
+        `Conta criada há menos de ${config.altMinDays} dias`
+      );
+
+      await sendLog(
+        member.guild,
+        "🧊 Anti-Alt detectado",
+        `Usuário: <@${member.id}>\nConta muito nova.\nIdade mínima: ${config.altMinDays} dias.`,
+        "Yellow"
+      );
     }
   }
 });
+// =====================================================
+// 29. EVENTO: MENSAGENS
+// =====================================================
 
 client.on("messageCreate", async message => {
   if (!message.guild) return;
   if (message.author.bot) return;
 
   const config = getConfig();
+
   if (isWhitelisted(message.author.id)) return;
 
-  const content = message.content.toLowerCase();
-
-  if (config.antieveryone) {
-    if (
+  // ANTI EVERYONE / HERE
+  if (
+    config.antieveryone &&
+    (
       message.content.includes("@everyone") ||
       message.content.includes("@here")
-    ) {
-      await message.delete().catch(() => {});
+    )
+  ) {
+    await message.delete().catch(() => {});
 
-      await sendLog(
-        message.guild,
-        "📢 Menção em massa bloqueada",
-        `Usuário: <@${message.author.id}>\nCanal: <#${message.channel.id}>`,
-        "Orange"
-      );
+    await sendLog(
+      message.guild,
+      "📢 Menção em massa bloqueada",
+      `Usuário: <@${message.author.id}>\nCanal: <#${message.channel.id}>`,
+      "Orange"
+    );
 
-      await registerDangerAction(
-        message.guild,
-        message.author.id,
-        "Uso de @everyone/@here"
-      );
+    await registerDangerAction(
+      message.guild,
+      message.author.id,
+      "Uso de @everyone/@here"
+    );
 
-      return;
-    }
+    return;
   }
 
-  if (config.antiinvite) {
-    const inviteRegex =
-      /(discord\.gg\/|discord\.com\/invite\/|discordapp\.com\/invite\/)/i;
+  // ANTI INVITE
+  if (
+    config.antiinvite &&
+    /(discord\.gg\/|discord\.com\/invite\/|discordapp\.com\/invite\/)/i.test(message.content)
+  ) {
+    await message.delete().catch(() => {});
 
-    if (inviteRegex.test(message.content)) {
-      await message.delete().catch(() => {});
+    await sendLog(
+      message.guild,
+      "🔗 Convite bloqueado",
+      `Usuário: <@${message.author.id}>\nCanal: <#${message.channel.id}>`,
+      "Yellow"
+    );
 
-      await sendLog(
-        message.guild,
-        "🔗 Convite bloqueado",
-        `Usuário: <@${message.author.id}>\nCanal: <#${message.channel.id}>`,
-        "Yellow"
-      );
-
-      return;
-    }
+    return;
   }
 
-  if (config.antilink) {
-    const linkRegex = /(https?:\/\/|www\.)/i;
+  // ANTI LINK
+  if (
+    config.antilink &&
+    /(https?:\/\/|www\.)/i.test(message.content)
+  ) {
+    await message.delete().catch(() => {});
 
-    if (linkRegex.test(message.content)) {
-      await message.delete().catch(() => {});
+    await sendLog(
+      message.guild,
+      "🌐 Link bloqueado",
+      `Usuário: <@${message.author.id}>\nCanal: <#${message.channel.id}>`,
+      "Yellow"
+    );
 
-      await sendLog(
-        message.guild,
-        "🌐 Link bloqueado",
-        `Usuário: <@${message.author.id}>\nCanal: <#${message.channel.id}>`,
-        "Yellow"
-      );
-
-      return;
-    }
+    return;
   }
 
+  // ANTI SPAM
   if (config.antispam) {
     const key = `${message.guild.id}-${message.author.id}`;
     const old = spamMap.get(key) || [];
-    const filtered = old.filter(t => Date.now() - t < 7000);
+    const filtered = old.filter(time => Date.now() - time < 7000);
 
     filtered.push(Date.now());
     spamMap.set(key, filtered);
@@ -1548,6 +2134,46 @@ client.on("messageCreate", async message => {
     }
   }
 });
+
+
+// =====================================================
+// 30. EVENTO: CARGO ATUALIZADO / PERMISSÃO PERIGOSA
+// =====================================================
+
+client.on("roleUpdate", async (oldRole, newRole) => {
+  const config = getConfig();
+
+  if (!config.antidangerousrole) return;
+  if (!hasDangerousPermissions(newRole)) return;
+  if (hasDangerousPermissions(oldRole)) return;
+
+  const executor = await getExecutor(newRole.guild, AuditLogEvent.RoleUpdate);
+
+  if (!executor) return;
+  if (executor.id === client.user.id) return;
+  if (isWhitelisted(executor.id)) return;
+
+  await newRole.setPermissions(oldRole.permissions.bitfield).catch(() => {});
+
+  await sendLog(
+    newRole.guild,
+    "⚠️ Permissão perigosa bloqueada",
+    `Executor: <@${executor.id}>\nCargo: **${newRole.name}**\nPermissões perigosas foram removidas.`,
+    "Red"
+  );
+
+  await registerDangerAction(
+    newRole.guild,
+    executor.id,
+    "Tentativa de adicionar permissão perigosa em cargo"
+  );
+});
+
+
+// =====================================================
+// 31. BOT ONLINE
+// =====================================================
+
 client.once("clientReady", async () => {
   console.log(`✅ Security System online como ${client.user.tag}`);
 
@@ -1557,6 +2183,11 @@ client.once("clientReady", async () => {
     console.error("❌ Erro ao registrar comandos:", error);
   }
 });
+
+
+// =====================================================
+// 32. ERROS E LOGIN
+// =====================================================
 
 process.on("unhandledRejection", error => {
   console.error("Erro não tratado:", error);

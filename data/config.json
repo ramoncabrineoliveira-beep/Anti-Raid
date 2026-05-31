@@ -1,0 +1,28 @@
+{
+  "antiraid": true,
+  "antinuke": true,
+  "antispam": true,
+  "antiinvite": true,
+  "antilink": false,
+  "antibot": true,
+  "antiwebhook": true,
+  "antieveryone": true,
+  "antichannelcreate": true,
+  "antichanneldelete": true,
+  "antirolecreate": true,
+  "antiroledelete": true,
+  "antiban": true,
+  "antikick": true,
+  "botlock": false,
+  "webhooklock": false,
+  "lockdown": false,
+  "emergency": true,
+  "whitelist": [],
+  "blacklist": [],
+  "allowedBots": [],
+  "logChannel": "1509726108533260378",
+  "immuneRoles": [
+    "1509726003742642196",
+    "1509726028463996928"
+  ]
+}
